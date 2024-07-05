@@ -248,7 +248,18 @@ for i, data in enumerate(trainloader):
     # print("x_hat shape:", x_hat.shape)
     # print("x_hat:", x_hat)
 
-    x_concat = torch.cat((x,x_hat),0)
+    totallen = 32
+    # print("Label shape:", y.shape)
+    # print("Shape x:", x.shape)
+    padReqEachSide = int((totallen-x.shape[-1])/2)
+    # print("padReqEachSide:", padReqEachSide)
+    # Pad x to increase to totallen as needed by Resnet to avoid shrinking in decoder
+    xpadded = F.pad(x, (padReqEachSide,padReqEachSide, padReqEachSide,padReqEachSide))
+    # print("xpadded shape:", xpadded.shape)
+    # Increase to 3 channels
+    updatedx = torch.cat((xpadded,xpadded,xpadded), 1)
+
+    x_concat = torch.cat((updatedx,x_hat),0)
     gridOutput = make_grid(x_concat,nrow=10).permute(1, 2, 0).numpy()
 
     gridOutput[gridOutput>1.0] = 1.0

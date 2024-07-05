@@ -1,4 +1,3 @@
-
 import lightning as pl
 import torch
 from torch import nn
@@ -9,6 +8,7 @@ from pl_bolts.models.autoencoders.components import (
     resnet18_encoder,
 )
 import torchvision
+import torchvision.transforms as transforms
 
 class VAE(pl.LightningModule):
     def __init__(self, enc_out_dim=512, latent_dim=256, input_height=32):
@@ -59,32 +59,40 @@ class VAE(pl.LightningModule):
         return kl
 
     def getUpdatedInput(self, x, y):
-        # print("Label shape:", data[1].shape)
-        # print("Shape data[0]:", data[0].shape)
+
+        # Resnet model reduces the size so incrase to 32
+        totallen = 32
+        # print("Label shape:", y.shape)
+        # print("Shape x:", x.shape)
+        padReqEachSide = int((totallen-x.shape[-1])/2)
+        # print("padReqEachSide:", padReqEachSide)
+        # Pad x to increase to totallen as needed by Resnet to avoid shrinking in decoder
+        xpadded = F.pad(x, (padReqEachSide,padReqEachSide, padReqEachSide,padReqEachSide))
+        # print("xpadded shape:", xpadded.shape)
+        # Increase to 3 channels
+        updatedx = torch.cat((xpadded,xpadded,xpadded), 1)
         # print("Data labels:", data[1])
         y_hot_encoded = F.one_hot(y.long(),10)
         # print("One hot encoded vector shape:", y_hot_encoded.shape)
         # print("One hod encoded:", y_hot_encoded[0])
-        totallen = x.shape[-1]
         curlen = y_hot_encoded.shape[-1]
         y_hot_encoded_pad = F.pad(y_hot_encoded, (0,totallen-curlen))
         # print("One hod encoded padded shape:", y_hot_encoded_pad.shape)
         # print("One hod encoded padded:", y_hot_encoded_pad[0])
         y_hot_encoded_reshaped = y_hot_encoded_pad.reshape([y_hot_encoded_pad.shape[0],1,1,y_hot_encoded_pad.shape[-1]])
         # print("y_hot_encoded_reshaped shape:", y_hot_encoded_reshaped.shape)
-        y_hot_concat = torch.cat((y_hot_encoded_reshaped,y_hot_encoded_reshaped,y_hot_encoded_reshaped), 1)
-        # print("y_hot_concat shape:", y_hot_concat.shape)
-
-        concatdata = torch.cat((x,y_hot_concat), -2)
-        # print("Concatenaned:", concatdata.shape)
+        # Increase to 3 channels
+        updatedy = torch.cat((y_hot_encoded_reshaped,y_hot_encoded_reshaped,y_hot_encoded_reshaped), 1)
+        concatdata = torch.cat((updatedx,updatedy), -2)
+        # print("Concatenaned end:", concatdata.shape)
         # print("Concatenaned [0]:", concatdata[0])
 
-        return concatdata
+        return updatedx, concatdata
 
     def training_step(self, batch, batch_idx):
         x, y = batch
 
-        updatedInput = self.getUpdatedInput(x, y)
+        updatedx, updatedInput = self.getUpdatedInput(x, y)
 
         # encode x to get the mu and variance parameters
         x_encoded = self.encoder(updatedInput)
@@ -96,10 +104,16 @@ class VAE(pl.LightningModule):
         z = q.rsample()
 
         # decoded 
-        x_hat = self.decoder(z)
+        x_hat = vae.decoder(z)
+        # print("mu shape:", mu.shape)
+        # print("std shape:", std.shape)
+        # print("q shape:", q.shape)
+        # print("z shape:", z.shape)
+        # print("xhat shape:", x_hat.shape)
+        # print("updated x shape:", updatedx.shape)
 
         # reconstruction loss
-        recon_loss = self.gaussian_likelihood(x_hat, self.log_scale, x)
+        recon_loss = self.gaussian_likelihood(x_hat, self.log_scale, updatedx)
 
         # kl
         kl = self.kl_divergence(z, mu, std)
@@ -117,9 +131,9 @@ class VAE(pl.LightningModule):
         })
 
         return elbo
-
+    
     def inference(self, x, y):
-        updatedInput = self.getUpdatedInput(x, y)
+        updatedx, updatedInput = self.getUpdatedInput(x, y)
 
         # encode x to get the mu and variance parameters
         x_encoded = self.encoder(updatedInput)
@@ -133,35 +147,28 @@ class VAE(pl.LightningModule):
         # decoded 
         x_hat = self.decoder(z)
 
-        return x_hat
+        return updatedx, x_hat
 
-
-import torchvision.transforms as transforms
-
-trainset = torchvision.datasets.CIFAR10(root='./data', 
+trainset = torchvision.datasets.MNIST(root='./data', 
                                         train=True, 
                                         download=True,
-                                        transform=transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]))
-trainloader = torch.utils.data.DataLoader(trainset,
-                                          batch_size=1, num_workers=16,
-                                          shuffle=True)
-# images, labels = next(iter(trainloader))
-# plt.imshow(torchvision.utils.make_grid(images).permute(1, 2, 0) / 2 + 0.5); 
-# plt.title(' '.join(trainset.classes[label] for label in labels)); plt.show(
+                                        transform=transforms.Compose([transforms.ToTensor()]))
+trainloader = DataLoader(trainset,
+                            batch_size=1, num_workers=16,
+                            shuffle=True)
 
-model = VAE.load_from_checkpoint("./lightning_logs/version_23/checkpoints/epoch=29-step=93750.ckpt")
+
+vae = VAE.load_from_checkpoint("./lightning_logs/version_35/checkpoints/epoch=49-step=187500.ckpt")
 
 # disable randomness, dropout, etc...
-model.eval()
+vae.eval()
 
 from matplotlib.pyplot import imshow, figure, imsave
 from torchvision.utils import make_grid
 from matplotlib import pyplot as plt 
-
 xfull = None
 # create figure 
 fig = plt.figure(figsize=(3.5, 20)) 
-classes = ('plane', 'car', 'bird', 'cat','deer', 'dog', 'frog', 'horse', 'ship', 'truck')
 
 # setting values to rows and column variables 
 rows = 26
@@ -186,33 +193,43 @@ for i, data in enumerate(trainloader):
 
     # print("xnew shape:", xnew.shape)
     # print("ynew shape:", ynew.shape)
-    xnew = xnew.to(model.device)
-    ynew = ynew.to(model.device)
+    xnew = xnew.to(vae.device)
+    ynew = ynew.to(vae.device)
     # print("xnew:", xnew)
 
     # predict with the model
     with torch.no_grad():
         # encode x to get the mu and variance parameters
         # decoded 
-        x_hat = model.inference(xnew,ynew).cpu()
+        updatedx, x_hat = vae.inference(xnew,ynew)
+        updatedx = updatedx.cpu()
+        x_hat = x_hat.cpu()
         # print("pred shape:", x_hat.shape)
-
-    # filename = 'output_'+str(i)+'.png'
-    mean, std = [0.5, 0.5, 0.5], [0.5, 0.5, 0.5]
 
     # print("x_hat shape:", x_hat.shape)
     # print("x_hat:", x_hat)
 
-    x_concat = torch.cat((x.cpu(),x_hat),0)
-    gridOutput = make_grid(x_concat,nrow=10).permute(1, 2, 0).numpy() * std + mean
+    totallen = 32
+    # print("Label shape:", y.shape)
+    # print("Shape x:", x.shape)
+    padReqEachSide = int((totallen-x.shape[-1])/2)
+    # print("padReqEachSide:", padReqEachSide)
+    # Pad x to increase to totallen as needed by Resnet to avoid shrinking in decoder
+    xpadded = F.pad(x, (padReqEachSide,padReqEachSide, padReqEachSide,padReqEachSide))
+    # print("xpadded shape:", xpadded.shape)
+    # Increase to 3 channels
+    updatedx = torch.cat((xpadded,xpadded,xpadded), 1)
+
+    x_concat = torch.cat((updatedx,x_hat),0)
+    gridOutput = make_grid(x_concat,nrow=10).permute(1, 2, 0).numpy()
 
     gridOutput[gridOutput>1.0] = 1.0
     gridOutput[gridOutput<0.0] = 0.0
 
     # Adds a subplot at the 1st position 
     fig.add_subplot(rows, columns, i+1) 
-    classnames = ', '.join(f'{classes[j]:5s}' for j in ynew.cpu().tolist())
-    classnames = "Labels passed\nOrig:" + str(classes[y.item()]) + ", " + classnames
+    # classnames = ', '.join(f'{classes[j]:5s}' for j in ynew.cpu().tolist())
+    classnames = "Labels passed\nOrig:" + str(y.item()) + ", " + str(ynew.cpu().tolist())
 
     # showing image 
     plt.imshow(gridOutput) 
@@ -225,6 +242,6 @@ for i, data in enumerate(trainloader):
         break
 
 plt.tight_layout()
-filename = 'CIFAR_output_25x10_60epochs.png'
+filename = 'fullMnistOutput.png'
 
 fig.savefig(filename)
